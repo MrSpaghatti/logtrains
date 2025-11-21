@@ -3,8 +3,7 @@ mod llm;
 use anyhow::{Context, Result};
 use clap::Parser;
 use colored::Colorize;
-use dialoguer::Confirm;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::PathBuf;
 
 /// LogTrains: specialized AI log interpreter
@@ -22,17 +21,36 @@ struct Args {
     /// Use a specific model repo
     #[arg(long, default_value = "TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF")]
     model_repo: String,
+
+    /// Use a specific model file
+    #[arg(long, default_value = "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf")]
+    model_file: String,
 }
+
+const MAX_INPUT_CHARS: usize = 12_000;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
 
     // 1. Input Handling
-    let input_text = get_input(args.file.as_ref())?;
+    let mut input_text = get_input(args.file.as_ref())?;
     if input_text.trim().is_empty() {
         eprintln!("{}", "Error: No input provided. Pipe logs or provide a filename.".red());
         std::process::exit(1);
+    }
+
+    if input_text.len() > MAX_INPUT_CHARS {
+        eprintln!(
+            "{}",
+            format!(
+                "Warning: Input truncated to last {} characters.",
+                MAX_INPUT_CHARS
+            )
+            .yellow()
+        );
+        let start = input_text.len() - MAX_INPUT_CHARS;
+        input_text = input_text[start..].to_string();
     }
 
     // 2. Model Confirmation
@@ -43,7 +61,7 @@ async fn main() -> Result<()> {
 
     // 3. Load Model & Run Inference
     // We move the loading into a spinner or just print status
-    let mut engine = match llm::Inferencer::load(&args.model_repo).await {
+    let mut engine = match llm::Inferencer::load(&args.model_repo, &args.model_file).await {
         Ok(e) => e,
         Err(e) => {
             eprintln!("{} {}", "Failed to load model:".red(), e);
@@ -53,16 +71,18 @@ async fn main() -> Result<()> {
     };
 
     println!("{}", "LogTrains: Analyzing input...".cyan().bold());
-    
-    match engine.explain(&input_text) {
-        Ok(explanation) => {
-            println!("\n{}", "=== Explanation ===".green().bold());
-            println!("{}", explanation);
-            println!("{}", "===================".green().bold());
-        },
-        Err(e) => {
-            eprintln!("{} {}", "Inference failed:".red(), e);
-        }
+    println!("\n{}", "=== Explanation ===".green().bold());
+
+    let res = engine.explain(&input_text, |token| {
+        print!("{}", token);
+        io::stdout().flush()?;
+        Ok(())
+    });
+
+    println!("\n{}", "===================".green().bold());
+
+    if let Err(e) = res {
+        eprintln!("{} {}", "Inference failed:".red(), e);
     }
 
     Ok(())
