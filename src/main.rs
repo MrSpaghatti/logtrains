@@ -3,7 +3,7 @@ mod llm;
 use anyhow::{Context, Result};
 use clap::Parser;
 use colored::Colorize;
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 
 /// LogTrains: specialized AI log interpreter
@@ -11,8 +11,12 @@ use std::path::PathBuf;
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// The log file to read (reads from stdin if not provided)
-    #[arg(name = "FILE")]
+    #[arg(name = "FILE", conflicts_with = "run")]
     file: Option<PathBuf>,
+
+    /// Execute a command and analyze its output
+    #[arg(long)]
+    run: Option<String>,
 
     /// Force a redownload/check of the model
     #[arg(long)]
@@ -34,9 +38,33 @@ async fn main() -> Result<()> {
     let args = Args::parse();
 
     // 1. Input Handling
-    let mut input_text = get_input(args.file.as_ref())?;
+    let mut input_text = if let Some(command) = args.run {
+        println!("Running command: {}", command.cyan());
+
+        let reader = duct::cmd("sh", ["-c", &command])
+            .stderr_to_stdout()
+            .reader()?;
+
+        let mut output = String::new();
+        let mut line = String::new();
+        let mut reader = BufReader::new(reader);
+
+        while let Ok(bytes_read) = reader.read_line(&mut line) {
+            if bytes_read == 0 {
+                break;
+            }
+            print!("{}", line);
+            output.push_str(&line);
+            line.clear();
+        }
+
+        output
+    } else {
+        get_input(args.file.as_ref())?
+    };
+
     if input_text.trim().is_empty() {
-        eprintln!("{}", "Error: No input provided. Pipe logs or provide a filename.".red());
+        eprintln!("{}", "Error: No input provided. Pipe logs, provide a filename, or use --run.".red());
         std::process::exit(1);
     }
 
