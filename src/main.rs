@@ -6,27 +6,40 @@ use colored::Colorize;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 
-/// LogTrains: specialized AI log interpreter
+/// A specialized AI log interpreter for your terminal.
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(
+    author,
+    version,
+    about,
+    long_about = "LogTrains is a command-line tool that uses a local large language model
+to analyze and explain log files or the output of other commands.
+
+It can be used in three ways:
+1. By passing a file path: `logtrains /path/to/your.log`
+2. By piping from stdin: `cargo build | logtrains`
+3. By executing a command directly: `logtrains --run \"npm install\"`
+
+The tool will then provide a concise, AI-generated explanation of any errors found."
+)]
 struct Args {
-    /// The log file to read (reads from stdin if not provided)
-    #[arg(name = "FILE", conflicts_with = "run")]
+    /// The log file to read. If not provided, reads from stdin.
+    #[arg(name = "log_file", conflicts_with = "run")]
     file: Option<PathBuf>,
 
-    /// Execute a command and analyze its output
+    /// Execute a command, stream its output, and analyze the result.
     #[arg(long)]
     run: Option<String>,
 
-    /// Force a redownload/check of the model
+    /// Force a redownload/check of the model weights.
     #[arg(long)]
     update_model: bool,
 
-    /// Use a specific model repo
+    /// The HuggingFace repository ID for the model.
     #[arg(long, default_value = "TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF")]
     model_repo: String,
 
-    /// Use a specific model file
+    /// The specific model file (GGUF) to use from the repository.
     #[arg(long, default_value = "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf")]
     model_file: String,
 }
