@@ -99,12 +99,38 @@ impl Inferencer {
         let tokens = self.tokenizer.encode(prompt, true).map_err(E::msg)?;
         let pre_prompt_tokens = tokens.get_ids();
 
+        // Context Window Management
+        // We aim for a safe input size to leave room for generation.
+        // Assuming a model context of 4096 (common for CodeLlama/TinyLlama-1.1B usually 2k but some variants 4k).
+        // The error log showed a dim of 4096.
+        // We'll reserve 512 tokens for generation.
+        const MAX_CONTEXT: usize = 4096;
+        const GEN_RESERVE: usize = 512;
+        const MAX_INPUT_TOKENS: usize = MAX_CONTEXT - GEN_RESERVE;
+        const SYSTEM_PRESERVE: usize = 150; // Keep first N tokens (system prompt)
+
+        let mut all_tokens = if pre_prompt_tokens.len() > MAX_INPUT_TOKENS {
+            // Truncate the middle
+            let keep_tail = MAX_INPUT_TOKENS - SYSTEM_PRESERVE;
+            let start = &pre_prompt_tokens[0..SYSTEM_PRESERVE];
+            let end = &pre_prompt_tokens[pre_prompt_tokens.len() - keep_tail..];
+
+            println!(
+                "Warning: Input too long ({} tokens). Truncating to safe limit ({} tokens).",
+                pre_prompt_tokens.len(),
+                MAX_INPUT_TOKENS
+            );
+
+            [start, end].concat()
+        } else {
+            pre_prompt_tokens.to_vec()
+        };
+
         let mut logits_processor = LogitsProcessor::new(299792458, Some(0.7), Some(0.9));
-        let mut all_tokens = pre_prompt_tokens.to_vec();
 
         let eos_token_id = self.tokenizer.token_to_id("</s>").unwrap_or(2);
 
-        for index in 0..500 {
+        for index in 0..GEN_RESERVE {
             let context_size = if index > 0 { 1 } else { all_tokens.len() };
             let start_pos = all_tokens.len() - context_size;
             let input = Tensor::new(&all_tokens[start_pos..], &self.device)?.unsqueeze(0)?;
