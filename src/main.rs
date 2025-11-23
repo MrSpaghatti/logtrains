@@ -250,8 +250,22 @@ async fn main() -> Result<()> {
 # Add the following function to your ~/.{shell}rc or ~/.zshrc file:
 
 logtrains-run() {{
+    # Configuration
+    # You can override these in your environment
+    local max_files=${{LOGTRAINS_MAX_FILES:-50}}
+    local exclude_cmds="${{LOGTRAINS_EXCLUDE:-cd ls pwd clear exit history}}"
+    local log_dir="{log_dir}"
+
+    # Check exclusion
+    local cmd="$1"
+    # Check if cmd is in the space-separated list
+    if [[ " $exclude_cmds " == *" $cmd "* ]]; then
+        "$@"
+        return $?
+    fi
+
     # Create directory if it doesn't exist
-    mkdir -p "{log_dir}"
+    mkdir -p "$log_dir"
 
     local timestamp=$(date +%s)
     # Sanitize command for filename: replace non-alphanumeric with _, truncate to 30 chars
@@ -259,10 +273,24 @@ logtrains-run() {{
     # If cmd_slug is empty, use 'unknown'
     [ -z "$cmd_slug" ] && cmd_slug="unknown"
 
-    local logfile="{log_dir}/log_${{timestamp}}_${{cmd_slug}}.log"
+    local logfile="$log_dir/log_${{timestamp}}_${{cmd_slug}}.log"
 
     # Execute and record
     script -q -c "$*" "$logfile"
+    local ret=$?
+
+    # Cleanup: Delete excess files
+    # List files sorted by name (oldest first because of timestamp prefix), count them
+    local files=$(ls -1 "$log_dir"/log_*.log 2>/dev/null)
+    local count=$(echo "$files" | grep -c "log_")
+
+    if [ "$count" -gt "$max_files" ]; then
+        local num_delete=$((count - max_files))
+        # Delete the oldest $num_delete files
+        echo "$files" | head -n "$num_delete" | xargs rm -f
+    fi
+
+    return $ret
 }}
 
 # Usage:
