@@ -2,6 +2,7 @@ mod llm;
 
 use anyhow::{Context, Result};
 use colored::Colorize;
+use serde::Deserialize;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 
@@ -24,7 +25,12 @@ It can be used in three ways:
 
 To enable the '--last' feature, run `logtrains setup` and follow the instructions.
 
-The tool will then provide a concise, AI-generated explanation of any errors found."
+The tool can be configured via a file at `~/.config/logtrains/config.toml`.
+Example config.toml:
+    model_repo = \"TheBloke/CodeLlama-7B-Instruct-GGUF\"
+    model_file = \"codellama-7b-instruct.Q4_K_M.gguf\"
+    prompt_file = \"/path/to/my/prompt.txt\"
+"
 )]
 struct Args {
     #[command(subcommand)]
@@ -46,11 +52,11 @@ struct AnalyzeArgs {
     file: Option<PathBuf>,
 
     /// Execute a command, stream its output, and analyze the result.
-    #[arg(long, conflicts_with_all = &["file", "last"])]
+    #[arg(long, conflicts_with_all = &["log_file", "last"])]
     run: Option<String>,
 
     /// Analyze the output of the last command (requires setup).
-    #[arg(long, conflicts_with_all = &["file", "run"])]
+    #[arg(long, conflicts_with_all = &["log_file", "run"])]
     last: bool,
 
     /// Force a redownload/check of the model weights.
@@ -58,12 +64,37 @@ struct AnalyzeArgs {
     update_model: bool,
 
     /// The HuggingFace repository ID for the model.
-    #[arg(long, default_value = "TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF")]
-    model_repo: String,
+    #[arg(long)]
+    model_repo: Option<String>,
 
     /// The specific model file (GGUF) to use from the repository.
-    #[arg(long, default_value = "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf")]
-    model_file: String,
+    #[arg(long)]
+    model_file: Option<String>,
+
+    /// Path to a custom prompt template file.
+    #[arg(long)]
+    prompt_file: Option<PathBuf>,
+}
+
+#[derive(Deserialize, Debug, Default)]
+struct Config {
+    model_repo: Option<String>,
+    model_file: Option<String>,
+    prompt_file: Option<PathBuf>,
+}
+
+impl Config {
+    fn load() -> Result<Self> {
+        if let Some(config_dir) = dirs::config_dir() {
+            let config_path = config_dir.join("logtrains/config.toml");
+            if config_path.exists() {
+                let config_str = std::fs::read_to_string(config_path)?;
+                let config: Config = toml::from_str(&config_str)?;
+                return Ok(config);
+            }
+        }
+        Ok(Config::default())
+    }
 }
 
 const MAX_INPUT_CHARS: usize = 12_000;
@@ -74,9 +105,20 @@ async fn main() -> Result<()> {
 
     match args.command {
         Commands::Analyze(analyze_args) => {
+            let config = Config::load()?;
+
+            // Layer the configuration: CLI args > config file > defaults
+            let model_repo = analyze_args.model_repo.or(config.model_repo).unwrap_or_else(|| "TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF".to_string());
+            let model_file = analyze_args.model_file.or(config.model_file).unwrap_or_else(|| "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf".to_string());
+            let prompt_file = analyze_args.prompt_file.or(config.prompt_file);
+
             // 1. Input Handling
             let mut input_text = if analyze_args.last {
-                let log_file = dirs::cache_dir().unwrap().join("logtrains").join("last.log");
+                let log_file = if let Some(cache_dir) = dirs::cache_dir() {
+                    cache_dir.join("logtrains").join("last.log")
+                } else {
+                    return Err(anyhow::anyhow!("Could not determine cache directory."));
+                };
                 std::fs::read_to_string(log_file)?
             } else if let Some(command) = analyze_args.run {
                 println!("Running command: {}", command.cyan());
@@ -125,7 +167,7 @@ async fn main() -> Result<()> {
             println!("{}", "LogTrains: Initializing... (First run requires ~1GB download)".yellow());
 
             // 3. Load Model & Run Inference
-            let mut engine = match llm::Inferencer::load(&analyze_args.model_repo, &analyze_args.model_file).await {
+            let mut engine = match llm::Inferencer::load(&model_repo, &model_file).await {
                 Ok(e) => e,
                 Err(e) => {
                     eprintln!("{} {}", "Failed to load model:".red(), e);
@@ -134,10 +176,16 @@ async fn main() -> Result<()> {
                 }
             };
 
+            let prompt_template = if let Some(path) = prompt_file {
+                Some(std::fs::read_to_string(path)?)
+            } else {
+                None
+            };
+
             println!("{}", "LogTrains: Analyzing input...".cyan().bold());
             println!("\n{}", "=== Explanation ===".green().bold());
 
-            let res = engine.explain(&input_text, |token| {
+            let res = engine.explain(&input_text, prompt_template, |token| {
                 print!("{}", token);
                 io::stdout().flush()?;
                 Ok(())
@@ -158,29 +206,26 @@ async fn main() -> Result<()> {
 
             let script = match shell_name {
                 "bash" | "zsh" => {
-                    let log_dir = dirs::cache_dir().unwrap().join("logtrains");
+                    let log_dir = if let Some(cache_dir) = dirs::cache_dir() {
+                        cache_dir.join("logtrains")
+                    } else {
+                        return Err(anyhow::anyhow!("Could not determine cache directory."));
+                    };
                     std::fs::create_dir_all(&log_dir)?;
                     let log_file = log_dir.join("last.log");
 
                     format!(
                         r#"
 # LogTrains Setup Script for {shell}
-# Add the following lines to your ~/.{shell}rc file:
+# Add the following function to your ~/.{shell}rc file:
 
-export LOGTRAINS_LOG_FILE="{log_file}"
+logtrains-run() {{
+    script -q -c "$@" "{log_file}"
+}}
 
-if [[ -n "$BASH_VERSION" ]]; then
-    _logtrains_preexec() {{
-        exec 3>&1 4>&2
-        exec &> >(tee "$LOGTRAINS_LOG_FILE")
-    }}
-    trap '_logtrains_preexec' DEBUG
-elif [[ -n "$ZSH_VERSION" ]]; then
-    _logtrains_preexec() {{
-        exec > >(tee "$LOGTRAINS_LOG_FILE") 2>&1
-    }}
-    preexec_functions+=(_logtrains_preexec)
-fi
+# Now you can run a command and analyze it like this:
+# logtrains-run npm install
+# logtrains analyze --last
 "#,
                         shell = shell_name,
                         log_file = log_file.display()

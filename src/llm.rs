@@ -77,19 +77,24 @@ impl Inferencer {
     pub fn explain<F: FnMut(String) -> Result<()>>(
         &mut self,
         log_text: &str,
+        prompt_template: Option<String>,
         mut callback: F,
     ) -> Result<()> {
-        let prompt = format!(
-            "<|system|>\n\
-            You are a CLI log analysis expert. Your job is to explain errors concisely. \n\
-            Analyze the following log output. Provide a summary of the error and a suggested fix.\n\
-            Do NOT repeat the full log. Be brief. Use Markdown.</s>\n\
-            <|user|>\n\
-            {}\n\
-            </s>\n\
-            <|assistant|>\n",
-            log_text
-        );
+        let prompt = if let Some(template) = prompt_template {
+            template.replace("{{LOG_TEXT}}", log_text)
+        } else {
+            format!(
+                "<|system|>\n\
+                You are a CLI log analysis expert. Your job is to explain errors concisely. \n\
+                Analyze the following log output. Provide a summary of the error and a suggested fix.\n\
+                Do NOT repeat the full log. Be brief. Use Markdown.</s>\n\
+                <|user|>\n\
+                {}\n\
+                </s>\n\
+                <|assistant|>\n",
+                log_text
+            )
+        };
 
         let tokens = self.tokenizer.encode(prompt, true).map_err(E::msg)?;
         let pre_prompt_tokens = tokens.get_ids();
