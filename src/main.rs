@@ -78,6 +78,18 @@ struct AnalyzeArgs {
     /// Path to a custom prompt template file.
     #[arg(long)]
     prompt_file: Option<PathBuf>,
+
+    /// Model size preset to use (overridden by --model-repo).
+    #[arg(long, value_enum, default_value = "medium")]
+    preset: Preset,
+}
+
+#[derive(clap::ValueEnum, Clone, Debug)]
+enum Preset {
+    /// TinyLlama 1.1B (~600MB) - Fast, lower quality
+    Tiny,
+    /// Mistral 7B (~4.1GB) - Balanced, high quality
+    Medium,
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -111,9 +123,27 @@ async fn main() -> Result<()> {
         Commands::Analyze(analyze_args) => {
             let config = Config::load()?;
 
-            // Layer the configuration: CLI args > config file > defaults
-            let model_repo = analyze_args.model_repo.or(config.model_repo).unwrap_or_else(|| "TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF".to_string());
-            let model_file = analyze_args.model_file.or(config.model_file).unwrap_or_else(|| "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf".to_string());
+            // Determine model based on preset or overrides
+            let (default_repo, default_file) = match analyze_args.preset {
+                Preset::Tiny => (
+                    "TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF",
+                    "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf",
+                ),
+                Preset::Medium => (
+                    "TheBloke/Mistral-7B-Instruct-v0.2-GGUF",
+                    "mistral-7b-instruct-v0.2.Q4_K_M.gguf",
+                ),
+            };
+
+            // Layer the configuration: CLI args > config file > defaults (from preset)
+            let model_repo = analyze_args
+                .model_repo
+                .or(config.model_repo)
+                .unwrap_or_else(|| default_repo.to_string());
+            let model_file = analyze_args
+                .model_file
+                .or(config.model_file)
+                .unwrap_or_else(|| default_file.to_string());
             let prompt_file = analyze_args.prompt_file.or(config.prompt_file);
 
             // 1. Input Handling
@@ -195,7 +225,14 @@ async fn main() -> Result<()> {
             }
 
             // 2. Model Confirmation
-            println!("{}", "LogTrains: Initializing... (First run requires ~1GB download)".yellow());
+            println!(
+                "{}",
+                format!(
+                    "LogTrains: Initializing... (Model: {}). First run may require a large download.",
+                    model_file
+                )
+                .yellow()
+            );
 
             // 3. Load Model & Run Inference
             let mut engine = match llm::Inferencer::load(&model_repo, &model_file).await {
