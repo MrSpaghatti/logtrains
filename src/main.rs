@@ -150,24 +150,13 @@ async fn main() -> Result<()> {
                 std::process::exit(1);
             }
 
-            if input_text.len() > MAX_INPUT_CHARS {
-                eprintln!(
-                    "{}",
-                    format!(
-                        "Warning: Input truncated to last {} characters.",
-                        MAX_INPUT_CHARS
-                    )
-                    .yellow()
-                );
-                let start = input_text.len() - MAX_INPUT_CHARS;
-                input_text = input_text[start..].to_string();
-            }
+            input_text = truncate_input(input_text, MAX_INPUT_CHARS);
 
             // 2. Model Confirmation
             println!("{}", "LogTrains: Initializing... (First run requires ~1GB download)".yellow());
 
             // 3. Load Model & Run Inference
-            let mut engine = match llm::Inferencer::load(&model_repo, &model_file).await {
+            let mut engine = match llm::ModelLoaderBuilder::new(&model_repo, &model_file).load().await {
                 Ok(e) => e,
                 Err(e) => {
                     eprintln!("{} {}", "Failed to load model:".red(), e);
@@ -214,13 +203,19 @@ async fn main() -> Result<()> {
                     std::fs::create_dir_all(&log_dir)?;
                     let log_file = log_dir.join("last.log");
 
+                    let script_command = match std::env::consts::OS {
+                        "macos" => format!(r#"script -q "{}" "$@""#, log_file.display()),
+                        "linux" => format!(r#"script -q -c "$@" "{}""#, log_file.display()),
+                        _ => "# Unsupported OS for `script` command. Please adapt for your system.".to_string(),
+                    };
+
                     format!(
                         r#"
 # LogTrains Setup Script for {shell}
 # Add the following function to your ~/.{shell}rc file:
 
 logtrains-run() {{
-    script -q -c "$@" "{log_file}"
+    {script_command}
 }}
 
 # Now you can run a command and analyze it like this:
@@ -228,7 +223,7 @@ logtrains-run() {{
 # logtrains analyze --last
 "#,
                         shell = shell_name,
-                        log_file = log_file.display()
+                        script_command = script_command
                     )
                 }
                 _ => {
@@ -258,4 +253,47 @@ fn get_input(file_path: Option<&PathBuf>) -> Result<String> {
         io::stdin().read_to_string(&mut buffer).context("Failed to read from stdin")?;
     }
     Ok(buffer)
+}
+
+fn truncate_input(input: String, max_chars: usize) -> String {
+    if input.len() > max_chars {
+        eprintln!(
+            "{}",
+            format!(
+                "Warning: Input truncated to last {} characters.",
+                max_chars
+            )
+            .yellow()
+        );
+        let start = input.len() - max_chars;
+        input[start..].to_string()
+    } else {
+        input
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_truncate_input_no_truncation() {
+        let input = "hello world".to_string();
+        let truncated = truncate_input(input.clone(), 20);
+        assert_eq!(truncated, input);
+    }
+
+    #[test]
+    fn test_truncate_input_with_truncation() {
+        let input = "hello world".to_string();
+        let truncated = truncate_input(input.clone(), 5);
+        assert_eq!(truncated, "world");
+    }
+
+    #[test]
+    fn test_truncate_input_zero_max_chars() {
+        let input = "hello world".to_string();
+        let truncated = truncate_input(input.clone(), 0);
+        assert_eq!(truncated, "");
+    }
 }
