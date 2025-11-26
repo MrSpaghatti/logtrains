@@ -209,7 +209,7 @@ async fn main() -> Result<()> {
 
                 output
             } else {
-                get_input(analyze_args.file.as_ref())?
+                get_input(analyze_args.file.as_ref())? 
             };
 
             if input_text.trim().is_empty() {
@@ -284,10 +284,10 @@ async fn main() -> Result<()> {
                     };
 
                     println!(
-                        r#"# LogTrains Setup Script for {shell}
+                        r###"# LogTrains Setup Script for {shell}
 # Add the following function to your ~/.{shell}rc or ~/.zshrc file:
 
-logtrains-run() {{ 
+logtrains-run() {{
     # Configuration
     # You can override these in your environment
     local max_files=${{LOGTRAINS_MAX_FILES:-50}}
@@ -336,7 +336,7 @@ logtrains-run() {{
 # logtrains analyze --last      # Analyze the most recent command
 # logtrains analyze --last 2    # Analyze the 2nd most recent command
 # logtrains history             # See list of recorded commands
-"#,
+"###,
                         shell = shell_name,
                         log_dir = log_dir.display(),
                         script_cmd = script_cmd
@@ -357,7 +357,7 @@ logtrains-run() {{
             let files = get_sorted_log_files(&log_dir)?;
             if files.is_empty() {
                 println!("No command history found.");
-                return Ok(());
+                return Ok(())
             }
 
             println!("{:<5} | {:<20} | {}", "Index", "Time", "File/Command");
