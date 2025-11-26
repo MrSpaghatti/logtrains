@@ -15,23 +15,27 @@ use clap::{Parser, Subcommand};
     author,
     version,
     about,
-    long_about = "LogTrains is a command-line tool that uses a local large language model
+    long_about = r#"LogTrains is a command-line tool that uses a local large language model
 to analyze and explain log files or the output of other commands.
 
 It can be used in three ways:
 1. By passing a file path: `logtrains /path/to/your.log`
 2. By piping from stdin: `cargo build | logtrains`
-3. By executing a command directly: `logtrains --run \"npm install\"`
-4. By analyzing the last command's output: `logtrains --last` (requires setup)
+3. By executing a command directly: `logtrains --run "npm install"`
+4. By analyzing previous commands' output: `logtrains analyze --last [N]` (requires setup)
 
-To enable the '--last' feature, run `logtrains setup` and follow the instructions.
+To enable history, run `logtrains setup` and follow the instructions.
 
 The tool can be configured via a file at `~/.config/logtrains/config.toml`.
 Example config.toml:
-    model_repo = \"TheBloke/CodeLlama-7B-Instruct-GGUF\"
-    model_file = \"codellama-7b-instruct.Q4_K_M.gguf\"
-    prompt_file = \"/path/to/my/prompt.txt\"
-"
+    model_repo = "TheBloke/CodeLlama-7B-Instruct-GGUF"
+    model_file = "codellama-7b-instruct.Q4_K_M.gguf"
+    prompt = """
+You are a {{ROLE}}.
+Your task is to analyze the following log output:
+{{LOG_TEXT}}
+"""
+"#
 )]
 struct Args {
     #[command(subcommand)]
@@ -42,7 +46,7 @@ struct Args {
 enum Commands {
     /// Analyze a log file, piped input, or command output.
     Analyze(AnalyzeArgs),
-    /// Print the shell script to enable the '--last' feature.
+    /// Print the shell script to enable command history.
     Setup,
     /// List the history of recorded commands.
     History,
@@ -58,8 +62,8 @@ struct AnalyzeArgs {
     #[arg(long, conflicts_with_all = &["log_file", "last"])]
     run: Option<String>,
 
-    /// Analyze the output of the last command (requires setup).
-    /// You can optionally specify how many commands back to look (e.g., --last 2).
+    /// Analyze the output of the last N commands (requires setup).
+    /// If N is not given, it defaults to 1.
     #[arg(long, conflicts_with_all = &["log_file", "run"], num_args=0..=1, default_missing_value="1")]
     last: Option<usize>,
 
@@ -78,6 +82,18 @@ struct AnalyzeArgs {
     /// Path to a custom prompt template file.
     #[arg(long)]
     prompt_file: Option<PathBuf>,
+
+    /// Model size preset to use (overridden by --model-repo).
+    #[arg(long, value_enum, default_value = "medium")]
+    preset: Preset,
+}
+
+#[derive(clap::ValueEnum, Clone, Debug)]
+enum Preset {
+    /// TinyLlama 1.1B (~600MB) - Fast, lower quality
+    Tiny,
+    /// Mistral 7B (~4.1GB) - Balanced, high quality
+    Medium,
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -85,6 +101,7 @@ struct Config {
     model_repo: Option<String>,
     model_file: Option<String>,
     prompt_file: Option<PathBuf>,
+    prompt: Option<String>,
 }
 
 impl Config {
@@ -111,10 +128,29 @@ async fn main() -> Result<()> {
         Commands::Analyze(analyze_args) => {
             let config = Config::load()?;
 
-            // Layer the configuration: CLI args > config file > defaults
-            let model_repo = analyze_args.model_repo.or(config.model_repo).unwrap_or_else(|| "TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF".to_string());
-            let model_file = analyze_args.model_file.or(config.model_file).unwrap_or_else(|| "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf".to_string());
+            // Determine model based on preset or overrides
+            let (default_repo, default_file) = match analyze_args.preset {
+                Preset::Tiny => (
+                    "TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF",
+                    "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf",
+                ),
+                Preset::Medium => (
+                    "TheBloke/Mistral-7B-Instruct-v0.2-GGUF",
+                    "mistral-7b-instruct-v0.2.Q4_K_M.gguf",
+                ),
+            };
+
+            // Layer the configuration: CLI args > config file > defaults (from preset)
+            let model_repo = analyze_args
+                .model_repo
+                .or(config.model_repo)
+                .unwrap_or_else(|| default_repo.to_string());
+            let model_file = analyze_args
+                .model_file
+                .or(config.model_file)
+                .unwrap_or_else(|| default_file.to_string());
             let prompt_file = analyze_args.prompt_file.or(config.prompt_file);
+            let prompt_template = config.prompt;
 
             // 1. Input Handling
             let mut input_text = if let Some(n) = analyze_args.last {
@@ -183,10 +219,17 @@ async fn main() -> Result<()> {
 
             input_text = truncate_input(input_text, MAX_INPUT_CHARS);
 
-            // 2. Model Confirmation
-            println!("{}", "LogTrains: Initializing... (First run requires ~1GB download)".yellow());
+            // 2. Model Loading
+            println!(
+                "{}",
+                format!(
+                    "LogTrains: Initializing... (Model: {}). First run may require a large download.",
+                    model_file
+                )
+                .yellow()
+            );
 
-            // 3. Load Model & Run Inference
+            // Using the new Builder from the refactored llm.rs (HEAD)
             let mut engine = match llm::ModelLoaderBuilder::new(&model_repo, &model_file).load().await {
                 Ok(e) => e,
                 Err(e) => {
@@ -196,16 +239,17 @@ async fn main() -> Result<()> {
                 }
             };
 
-            let prompt_template = if let Some(path) = prompt_file {
+            // 3. Prompt Construction & Inference
+            let final_prompt_template = if let Some(path) = prompt_file {
                 Some(std::fs::read_to_string(path)?)
             } else {
-                None
+                prompt_template
             };
-
+            
             println!("{}", "LogTrains: Analyzing input...".cyan().bold());
             println!("\n{}", "=== Explanation ===".green().bold());
 
-            let res = engine.explain(&input_text, prompt_template, |token| {
+            let res = engine.explain(&input_text, final_prompt_template, |token| {
                 print!("{}", token);
                 io::stdout().flush()?;
                 Ok(())
@@ -234,19 +278,32 @@ async fn main() -> Result<()> {
                     std::fs::create_dir_all(&log_dir)?;
 
                     let script_cmd = match std::env::consts::OS {
-                        "macos" => r#"script -q "$logfile" "$@""#,
-                        "linux" => r#"script -q -c "$@" "$logfile""#,
+                        "macos" => r###"script -q "$logfile" "$@""###,
+                        "linux" => r###"script -q -c "$@" "$logfile""###,
                         _ => "echo 'Unsupported OS'",
                     };
 
                     println!(
-                        r#"
-# LogTrains Setup Script for {shell}
+                        r#"# LogTrains Setup Script for {shell}
 # Add the following function to your ~/.{shell}rc or ~/.zshrc file:
 
-logtrains-run() {{
+logtrains-run() {{ 
+    # Configuration
+    # You can override these in your environment
+    local max_files=${{LOGTRAINS_MAX_FILES:-50}}
+    local exclude_cmds="${{LOGTRAINS_EXCLUDE:-cd ls pwd clear exit history}}"
+    local log_dir="{log_dir}"
+
+    # Check exclusion
+    local cmd="$1"
+    # Check if cmd is in the space-separated list
+    if [[ " $exclude_cmds " == *" $cmd "* ]] || [[ -z "$cmd" ]]; then
+        "$@"
+        return $?
+    fi
+
     # Create directory if it doesn't exist
-    mkdir -p "{log_dir}"
+    mkdir -p "$log_dir"
 
     local timestamp=$(date +%s)
     # Sanitize command for filename: replace non-alphanumeric with _, truncate to 30 chars
@@ -254,10 +311,24 @@ logtrains-run() {{
     # If cmd_slug is empty, use 'unknown'
     [ -z "$cmd_slug" ] && cmd_slug="unknown"
 
-    local logfile="{log_dir}/log_${{timestamp}}_${{cmd_slug}}.log"
+    local logfile="$log_dir/log_${{timestamp}}_${{cmd_slug}}.log"
 
     # Execute and record
     {script_cmd}
+    local ret=$?
+
+    # Cleanup: Delete excess files
+    # List files sorted by name (oldest first because of timestamp prefix), count them
+    local files=$(ls -1 "$log_dir"/log_*.log 2>/dev/null)
+    local count=$(echo "$files" | grep -c "log_")
+
+    if [ "$count" -gt "$max_files" ]; then
+        local num_delete=$((count - max_files))
+        # Delete the oldest $num_delete files
+        echo "$files" | head -n "$num_delete" | xargs rm -f
+    fi
+
+    return $ret
 }}
 
 # Usage:
