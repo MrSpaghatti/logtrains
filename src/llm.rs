@@ -14,30 +14,49 @@ pub struct Inferencer {
     device: Device,
 }
 
-impl Inferencer {
-    pub async fn load(repo_id: &str, model_file: &str) -> Result<Self> {
-        println!("Locating model: {} ({})", repo_id, model_file);
-        let api = Api::new()?;
-        let repo = api.repo(Repo::new(repo_id.to_string(), RepoType::Model));
+pub struct ModelLoaderBuilder {
+    repo_id: String,
+    model_file: String,
+    tokenizer_fallback_repo: Option<String>,
+}
 
-        // 1. Get the model file (GGUF)
-        let model_path = repo.get(model_file).await?;
-        
-        // 2. Get the tokenizer
-        // TheBloke usually has tokenizer.json
+impl ModelLoaderBuilder {
+    pub fn new(repo_id: &str, model_file: &str) -> Self {
+        Self {
+            repo_id: repo_id.to_string(),
+            model_file: model_file.to_string(),
+            tokenizer_fallback_repo: Some("TinyLlama/TinyLlama-1.1B-Chat-v1.0".to_string()),
+        }
+    }
+
+    pub fn with_tokenizer_fallback(mut self, repo: &str) -> Self {
+        self.tokenizer_fallback_repo = Some(repo.to_string());
+        self
+    }
+
+    pub async fn load(self) -> Result<Inferencer> {
+        println!("Locating model: {} ({})", self.repo_id, self.model_file);
+        let api = Api::new()?;
+        let repo = api.repo(Repo::new(self.repo_id.clone(), RepoType::Model));
+
+        let model_path = repo.get(&self.model_file).await?;
+
         let tokenizer_path = match repo.get("tokenizer.json").await {
             Ok(path) => path,
             Err(_) => {
-                println!("Tokenizer not found in GGUF repo, fetching from base repo...");
-                let base_api = Api::new()?;
-                let base_repo = base_api.repo(Repo::new("TinyLlama/TinyLlama-1.1B-Chat-v1.0".to_string(), RepoType::Model));
-                base_repo.get("tokenizer.json").await?
+                if let Some(fallback_repo_id) = self.tokenizer_fallback_repo {
+                    println!("Tokenizer not found in GGUF repo, fetching from base repo: {}", fallback_repo_id);
+                    let base_api = Api::new()?;
+                    let base_repo = base_api.repo(Repo::new(fallback_repo_id, RepoType::Model));
+                    base_repo.get("tokenizer.json").await?
+                } else {
+                    return Err(E::msg("Tokenizer not found and no fallback was specified."));
+                }
             }
         };
-        
+
         let tokenizer = Tokenizer::from_file(tokenizer_path).map_err(E::msg)?;
-        
-        // 3. Load Model
+
         let device = if cuda_is_available() {
             match Device::new_cuda(0) {
                 Ok(device) => device,
@@ -61,19 +80,19 @@ impl Inferencer {
         println!("Using device: {:?}", device);
 
         let mut file = std::fs::File::open(&model_path)?;
-        
-        let model = gguf_file::Content::read(&mut file)
+        let model_content = gguf_file::Content::read(&mut file)
             .map_err(|e| E::msg(format!("Failed to read GGUF: {}", e)))?;
-            
-        let model = ModelWeights::from_gguf(model, &mut file, &device)?;
+        let model = ModelWeights::from_gguf(model_content, &mut file, &device)?;
 
-        Ok(Self {
+        Ok(Inferencer {
             model,
             tokenizer,
             device,
         })
     }
+}
 
+impl Inferencer {
     pub fn explain<F: FnMut(String) -> Result<()>>(
         &mut self,
         log_text: &str,
