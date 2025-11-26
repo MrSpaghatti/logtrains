@@ -29,11 +29,6 @@ impl ModelLoaderBuilder {
         }
     }
 
-    pub fn with_tokenizer_fallback(mut self, repo: &str) -> Self {
-        self.tokenizer_fallback_repo = Some(repo.to_string());
-        self
-    }
-
     pub async fn load(self) -> Result<Inferencer> {
         println!("Locating model: {} ({})", self.repo_id, self.model_file);
         let api = Api::new()?;
