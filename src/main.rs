@@ -86,6 +86,10 @@ struct AnalyzeArgs {
     /// Model size preset to use (overridden by --model-repo).
     #[arg(long, value_enum, default_value = "medium")]
     preset: Preset,
+
+    /// Filter the log input by a keyword.
+    #[arg(long)]
+    filter: Option<String>,
 }
 
 #[derive(clap::ValueEnum, Clone, Debug)]
@@ -212,8 +216,22 @@ async fn main() -> Result<()> {
                 get_input(analyze_args.file.as_ref())? 
             };
 
+            // Apply the filter if provided
+            if let Some(filter_keyword) = &analyze_args.filter {
+                input_text = input_text
+                    .lines()
+                    .filter(|line| line.contains(filter_keyword))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+            }
+
             if input_text.trim().is_empty() {
-                eprintln!("{}", "Error: No input provided. Pipe logs, provide a filename, or use --run.".red());
+                let error_msg = if analyze_args.filter.is_some() {
+                    "Error: No lines matched the filter.".red()
+                } else {
+                    "Error: No input provided. Pipe logs, provide a filename, or use --run.".red()
+                };
+                eprintln!("{}", error_msg);
                 std::process::exit(1);
             }
 
@@ -392,7 +410,14 @@ fn get_sorted_log_files(log_dir: &std::path::Path) -> Result<Vec<PathBuf>> {
     let mut files: Vec<PathBuf> = std::fs::read_dir(log_dir)?
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.path())
-        .filter(|path| path.is_file())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.starts_with("log_") && s.ends_with(".log"))
+                    .unwrap_or(false)
+        })
         .collect();
 
     // Sort by filename (which includes timestamp), newest first (descending)
@@ -412,7 +437,7 @@ fn get_input(file_path: Option<&PathBuf>) -> Result<String> {
             .with_context(|| format!("Failed to read file: {:?}", path))?;
         buffer = content;
     } else {
-        // check if stdin is a tty, if it is, we might be waiting forever for user input which is confusing
+        // check if stdin is a tty, if it is, we might be waiting for user input which is confusing
         // but for now, we assume the user knows to pipe or type
         if atty::is(atty::Stream::Stdin) {
              println!("{}", "Listening on stdin... (Ctrl+D to finish)".yellow());
@@ -442,6 +467,8 @@ fn truncate_input(input: String, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::File;
+    use tempfile::tempdir;
 
     #[test]
     fn test_truncate_input_no_truncation() {
@@ -462,5 +489,56 @@ mod tests {
         let input = "hello world".to_string();
         let truncated = truncate_input(input.clone(), 0);
         assert_eq!(truncated, "");
+    }
+
+    #[test]
+    fn test_filter_input() {
+        let input = "hello world\nthis is a test\nhello again".to_string();
+        let filtered = input
+            .lines()
+            .filter(|line| line.contains("hello"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(filtered, "hello world\nhello again");
+    }
+
+    #[test]
+    fn test_get_sorted_log_files() {
+        let dir = tempdir().unwrap();
+        let dir_path = dir.path();
+
+        // Create some dummy files
+        File::create(dir_path.join("log_1672531200_test1.log")).unwrap(); // Oldest
+        File::create(dir_path.join("log_1672531201_test2.log")).unwrap();
+        File::create(dir_path.join("log_1672531202_test3.log")).unwrap(); // Newest
+        File::create(dir_path.join("not_a_log_file.txt")).unwrap(); // Should be ignored
+
+        let sorted_files = get_sorted_log_files(dir_path).unwrap();
+
+        assert_eq!(sorted_files.len(), 3);
+        assert_eq!(
+            sorted_files[0]
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "log_1672531202_test3.log"
+        );
+        assert_eq!(
+            sorted_files[1]
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "log_1672531201_test2.log"
+        );
+        assert_eq!(
+            sorted_files[2]
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "log_1672531200_test1.log"
+        );
     }
 }
